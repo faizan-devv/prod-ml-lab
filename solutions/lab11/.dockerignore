@@ -1,0 +1,6 @@
+.venv
+data
+.git
+.lab
+**/__pycache__
+solutions

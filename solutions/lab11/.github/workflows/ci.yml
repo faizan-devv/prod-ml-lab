@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.28"
+      - name: Install
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check src dags tests
+      - name: Unit tests (no services)
+        run: uv run pytest tests -m "not services"
+      - name: DAGs parse
+        run: |
+          docker build -t lab-airflow docker/airflow
+          docker run --rm -v "$PWD/dags:/opt/airflow/dags" lab-airflow \
+            python -c "from airflow.dag_processing.dagbag import DagBag; b = DagBag('/opt/airflow/dags'); assert not b.import_errors, b.import_errors; print(sorted(b.dags))"

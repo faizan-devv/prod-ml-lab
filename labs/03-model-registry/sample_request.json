@@ -1,0 +1,24 @@
+[
+  {
+    "amount":56.93,
+    "txn_hour":0.0,
+    "is_online":0.0,
+    "cust_txn_count":9.0,
+    "cust_avg_amount":28.9922,
+    "amount_to_cust_avg":1.9636,
+    "cust_chargeback_count":0.0,
+    "merch_txn_count":26.0,
+    "merch_fraud_rate":0.0
+  },
+  {
+    "amount":360.95,
+    "txn_hour":0.0,
+    "is_online":1.0,
+    "cust_txn_count":6.0,
+    "cust_avg_amount":228.0333,
+    "amount_to_cust_avg":1.5829,
+    "cust_chargeback_count":4.0,
+    "merch_txn_count":5.0,
+    "merch_fraud_rate":0.2
+  }
+]

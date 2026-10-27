@@ -1,0 +1,25 @@
+# Feast configuration.  >>> Lab 04 <<<
+#
+# Three storage roles, three different technologies - this split IS the feature store:
+#   registry      - the catalogue of definitions (what features exist).   Postgres
+#   offline_store - full history for training / point-in-time joins.     Parquet files
+#   online_store  - only the LATEST value per entity, for millisecond reads. Redis
+#
+# ${VARS} are expanded from the environment, so the same file works on your host and
+# inside the Airflow containers. Use `make feast-apply` (it loads .env for you).
+project: fraudlab
+provider: local
+registry:
+  registry_type: sql
+  path: ${FEAST_REGISTRY_URL}
+  cache_ttl_seconds: 5
+  sqlalchemy_config_kwargs:
+    pool_pre_ping: true
+online_store:
+  type: redis
+  connection_string: ${REDIS_CONNECTION_STRING}
+offline_store:
+  type: duckdb
+entity_key_serialization_version: 3
+auth:
+  type: no_auth

@@ -1,0 +1,26 @@
+# Loaded automatically by `docker compose` next to compose.yaml.
+# The scoring API as a container, only started with:  docker compose --profile serving up -d serving
+services:
+  serving:
+    profiles: ["serving"]
+    build:
+      context: .
+      dockerfile: docker/serving/Dockerfile
+    image: prod-ml-lab/serving:latest
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      REDIS_CONNECTION_STRING: redis:6379
+      FEAST_REGISTRY_URL: postgresql+psycopg://lab:fraudlab@postgres:5432/feast
+      FRAUDLAB_DATA_DIR: /data
+    volumes:
+      - serving-logs:/data
+    ports:
+      - "${SERVING_PORT:-8001}:8000"
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  serving-logs:

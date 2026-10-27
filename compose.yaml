@@ -1,0 +1,175 @@
+# Production ML Lab: local platform
+#
+#   postgres  : metadata for MLflow, Airflow and the Feast registry (3 databases)
+#   redis     : Feast online store (low-latency feature lookups)
+#   mlflow    : tracking server + model registry + artifact proxy
+#   airflow-* : orchestrator (api-server/UI, scheduler, dag-processor) with LocalExecutor
+#
+# Host ports default to "offset" values (15432, 16379) so they don't clash with any
+# Postgres or Redis already running on your machine. Override them in .env.
+name: prod-ml-lab
+
+x-lab-env: &lab-env
+  # The same ML code runs here and on your host. Only the addresses differ.
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  REDIS_CONNECTION_STRING: redis:6379
+  FEAST_REGISTRY_URL: postgresql+psycopg://lab:fraudlab@postgres:5432/feast
+  FEAST_USAGE: "False"
+  MLFLOW_DISABLE_AGENT_HINT: "1"
+  # Keep stdout clean: the LAST line a BashOperator prints becomes its XCom value.
+  MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT: "true"
+
+x-airflow-common: &airflow-common
+  build:
+    context: docker/airflow
+  image: prod-ml-lab/airflow:3.3.2
+  environment: &airflow-env
+    <<: *lab-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__PARALLELISM: "4"
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://lab:fraudlab@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-local-lab-jwt-secret-change-me}
+    AIRFLOW__API_AUTH__JWT_ISSUER: airflow
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # Pick up new / edited DAG files quickly (defaults are tuned for big deployments).
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "15"
+    AIRFLOW__DAG_PROCESSOR__MIN_FILE_PROCESS_INTERVAL: "10"
+    # Where the ML code lives inside the containers + the isolated ML interpreter.
+    LAB_ROOT: ${LAB_ROOT:?LAB_ROOT is not set - run `make setup`}
+    ML_PYTHON: /opt/ml-venv/bin/python
+  volumes:
+    - ./dags:/opt/airflow/dags
+    # The repo is mounted at the SAME absolute path as on your host, so absolute paths
+    # stored in the Feast registry (parquet locations) are valid in both places.
+    - ./:${LAB_ROOT:?LAB_ROOT is not set - run `make setup`}
+    - airflow-logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: fraudlab
+      POSTGRES_DB: lab
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "lab"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.6
+    ports:
+      - "${REDIS_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  mlflow:
+    build:
+      context: docker/mlflow
+    image: prod-ml-lab/mlflow:3.17.2
+    command: >
+      mlflow server
+      --backend-store-uri postgresql+psycopg2://lab:fraudlab@postgres:5432/mlflow
+      --artifacts-destination /mlartifacts
+      --serve-artifacts
+      --host 0.0.0.0 --port 5000 --workers 2
+      --allowed-hosts "mlflow,mlflow:5000,localhost,localhost:*,127.0.0.1,127.0.0.1:*"
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlflow-artifacts:/mlartifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:5000/health"]
+      interval: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs && chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: airflow
+      _AIRFLOW_WWW_USER_PASSWORD: airflow
+    user: "0:0"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  mlflow-artifacts:
+  airflow-logs:
